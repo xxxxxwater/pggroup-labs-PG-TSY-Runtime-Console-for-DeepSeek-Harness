@@ -22,6 +22,14 @@ export function isHealthy(value) {
   return String(value ?? '').toUpperCase() === 'HEALTHY'
 }
 
+export function gateStatusLabel(status) {
+  if (typeof status === 'string') return status.toUpperCase()
+  if (status && typeof status === 'object' && Object.hasOwn(status, 'Failed')) {
+    return `FAILED · ${String(status.Failed)}`
+  }
+  return 'UNKNOWN'
+}
+
 export function assertRuntimeSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') {
     throw new Error('runtime snapshot must be a JSON object')
@@ -53,17 +61,8 @@ export function startupBlockers(snapshot) {
   if (snapshot?.startup?.ready === true) return []
   const gates = Array.isArray(snapshot?.startup?.gates) ? snapshot.startup.gates : []
   return gates
-    .filter(entry => {
-      if (entry?.status === 'passed') return false
-      if (entry?.status?.passed === true) return false
-      return true
-    })
-    .map(entry => {
-      const status = typeof entry?.status === 'string'
-        ? entry.status
-        : Object.keys(entry?.status ?? {})[0] ?? 'unknown'
-      return `${entry?.gate ?? 'unknown_gate'}=${status}`
-    })
+    .filter(entry => gateStatusLabel(entry?.status) !== 'PASSED')
+    .map(entry => `${entry?.gate ?? 'unknown_gate'}=${gateStatusLabel(entry?.status)}`)
 }
 
 export function effectiveRuntimeState(snapshot, now = Date.now()) {
