@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { EVENTS_ROUTE, SNAPSHOT_ROUTE, effectiveRuntimeState, makeDiagnosisPrompt, snapshotAgeMs } from '../shared.js'
+import {
+  EVENTS_ROUTE,
+  SNAPSHOT_ROUTE,
+  effectiveRuntimeState,
+  gateStatusLabel,
+  makeDiagnosisPrompt,
+  snapshotAgeMs,
+} from '../shared.js'
 
 const h = React.createElement
 
@@ -19,9 +26,9 @@ function fmtMoney(value) {
 
 function tone(value) {
   const v = String(value ?? '').toUpperCase()
-  if (['HEALTHY', 'RUNNING', 'ALLOWED', 'OWNED', 'NORMAL', 'MATCH'].includes(v)) return 'pgtsy-good'
-  if (['UNKNOWN', 'FAILED', 'HALTED', 'SAFE_HOLD', 'BLOCKED', 'STALE'].includes(v)) return 'pgtsy-bad'
-  if (['DEGRADED', 'PARTIAL', 'WARNING'].includes(v)) return 'pgtsy-warn'
+  if (['HEALTHY', 'RUNNING', 'ALLOWED', 'OWNED', 'NORMAL', 'MATCH', 'PASSED'].includes(v)) return 'pgtsy-good'
+  if (['UNKNOWN', 'FAILED', 'HALTED', 'SAFE_HOLD', 'BLOCKED', 'STALE', 'NOT OWNED'].includes(v)) return 'pgtsy-bad'
+  if (['DEGRADED', 'PARTIAL', 'WARNING', 'PENDING', 'CONFIGURED'].includes(v)) return 'pgtsy-warn'
   return ''
 }
 
@@ -46,16 +53,31 @@ async function getJson(url, signal) {
 
 function Overview({ snapshot, state }) {
   const venues = Array.isArray(snapshot?.venues) ? snapshot.venues : []
+  const feeds = Array.isArray(snapshot?.feeds) ? snapshot.feeds : []
   const strategies = Array.isArray(snapshot?.strategies) ? snapshot.strategies : []
   const positions = Array.isArray(snapshot?.positions) ? snapshot.positions : []
+  const gates = Array.isArray(snapshot?.startup?.gates) ? snapshot.startup.gates : []
   return h(React.Fragment, null,
     h(Section, { title: 'Safety' }, h(Card, null,
       h(Row, { label: 'New exposure', value: snapshot?.safety?.allow_new_exposure ? 'ALLOWED' : 'BLOCKED', className: snapshot?.safety?.allow_new_exposure ? 'pgtsy-good' : 'pgtsy-bad' }),
+      h(Row, { label: 'Startup', value: snapshot?.startup?.ready === true ? 'READY' : 'NOT READY', className: snapshot?.startup?.ready === true ? 'pgtsy-good' : 'pgtsy-bad' }),
       h(Row, { label: 'Lease', value: snapshot?.lease?.owned ? `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}` : 'NOT OWNED', className: snapshot?.lease?.owned ? 'pgtsy-good' : 'pgtsy-bad' }),
       h(Row, { label: 'Lease heartbeat', value: fmtMs(snapshot?.lease?.heartbeat_age_ms) }),
       h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${snapshot?.reconcile?.mismatch_count ?? 0} mismatch`, className: tone(snapshot?.reconcile?.status) }),
       h(Row, { label: 'Unknown orders', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
       h(Row, { label: 'Journal', value: snapshot?.storage?.journal ?? 'UNKNOWN', className: tone(snapshot?.storage?.journal) })
+    )),
+    h(Section, { title: 'Startup gates' }, h(Card, null,
+      gates.length ? gates.map(entry => {
+        const label = gateStatusLabel(entry.status)
+        return h(Row, { key: entry.gate, label: entry.gate, value: label, className: tone(label.split(' · ')[0]) })
+      }) : h('div', { className: 'pgtsy-empty' }, 'No startup gate telemetry')
+    )),
+    h(Section, { title: 'Feeds' }, h(Card, null,
+      feeds.length ? h('ul', { className: 'pgtsy-list' }, feeds.map((feed, index) => h('li', { key: `${feed.venue}-${feed.asset}-${feed.feed}-${index}` },
+        h('div', { className: 'pgtsy-line' }, h('strong', null, `${feed.asset} · ${feed.feed}`), h('span', { className: tone(feed.status) }, feed.status ?? 'UNKNOWN')),
+        h('div', { className: 'pgtsy-small' }, `${feed.venue} · ${feed.required === false ? 'optional' : 'required'} · age ${fmtMs(feed.age_ms)}`)
+      ))) : h('div', { className: 'pgtsy-empty' }, 'No configured feed telemetry')
     )),
     h(Section, { title: 'Venues' }, h(Card, null,
       venues.length ? venues.map(venue => h('div', { className: 'pgtsy-venue', key: venue.id },
@@ -73,13 +95,13 @@ function Overview({ snapshot, state }) {
       strategies.length ? h('ul', { className: 'pgtsy-list' }, strategies.map(item => h('li', { key: item.id },
         h('div', { className: 'pgtsy-line' }, h('strong', null, item.id), h('span', { className: tone(item.status) }, item.status)),
         h('div', { className: 'pgtsy-small' }, `${item.asset ?? '—'} · ${item.position ?? 'FLAT'} ${item.quantity ?? ''} · signal ${item.signal?.side ?? '—'} ${item.signal?.confidence ?? '—'} · age ${fmtMs(item.signal?.age_ms)}`)
-      ))) : h('div', { className: 'pgtsy-empty' }, 'No active strategies')
+      ))) : h('div', { className: 'pgtsy-empty' }, 'No configured strategies')
     )),
     h(Section, { title: 'Positions' }, h(Card, null,
       positions.length ? h('ul', { className: 'pgtsy-list' }, positions.map((item, index) => h('li', { key: `${item.venue}-${item.asset}-${index}` },
         h('div', { className: 'pgtsy-line' }, h('strong', null, `${item.asset} · ${item.side}`), h('span', null, `${item.quantity} · ${fmtMoney(item.notional_usd)}`)),
         h('div', { className: 'pgtsy-small' }, `${item.venue} · ownership ${item.ownership ?? 'UNKNOWN'}${item.strategy_id ? ` · ${item.strategy_id}` : ''}`)
-      ))) : h('div', { className: 'pgtsy-empty' }, 'No positions')
+      ))) : h('div', { className: 'pgtsy-empty' }, 'No positions reported')
     )),
     h(Section, { title: 'Performance' }, h(Card, null,
       h(Row, { label: 'PnL today', value: fmtMoney(snapshot?.performance?.pnl_today_usd), className: Number(snapshot?.performance?.pnl_today_usd) >= 0 ? 'pgtsy-good' : 'pgtsy-bad' }),
@@ -196,6 +218,6 @@ export function RuntimeConsole({ useTabInfo }) {
       h('button', { type: 'button', className: 'pgtsy-btn', disabled: !snapshot, onClick: copyPrompt }, copied ? 'Copied' : 'Copy diagnosis prompt'),
       h('button', { type: 'button', className: 'pgtsy-btn', disabled: true, title: 'Control mutations are intentionally disabled until pg-core typed control API is production-complete.' }, 'Emergency Exit · not wired')
     ),
-    h('footer', { className: 'pgtsy-foot' }, `Telemetry age ${Number.isFinite(age) ? fmtMs(age) : 'unknown'} · OFFLINE ≠ STOPPED · UNKNOWN ≠ REJECTED · process alive ≠ safe to trade`)
+    h('footer', { className: 'pgtsy-foot' }, `Telemetry age ${Number.isFinite(age) ? fmtMs(age) : 'unknown'} · PENDING/UNKNOWN = missing evidence · OFFLINE ≠ STOPPED · UNKNOWN ≠ REJECTED`)
   )
 }

@@ -1,15 +1,27 @@
-import { EVENTS_ROUTE, SNAPSHOT_ROUTE } from './shared.js'
+import {
+  EVENTS_ROUTE,
+  SNAPSHOT_ROUTE,
+  assertRuntimeEvents,
+  assertRuntimeSnapshot,
+} from './shared.js'
 import { mockEvents, mockSnapshot } from './host/mock.js'
 
 export const name = 'pg-tsy-runtime-console'
 export const inject = ['webServer', 'connection']
 
-function envConfig() {
-  const transport = String(process.env.PG_TSY_TRANSPORT ?? 'mock').toLowerCase()
-  const runtimeUrl = String(process.env.PG_TSY_RUNTIME_URL ?? '').replace(/\/+$/, '')
-  const token = process.env.PG_TSY_RUNTIME_TOKEN
-  const scenario = String(process.env.PG_TSY_MOCK_SCENARIO ?? 'normal').toLowerCase()
-  const timeoutMs = Math.max(250, Math.min(30_000, Number(process.env.PG_TSY_HTTP_TIMEOUT_MS ?? 3000)))
+export function envConfig(source = process.env) {
+  const runtimeUrl = String(source.PG_TSY_RUNTIME_URL ?? '').replace(/\/+$/, '')
+  const explicitTransport = String(source.PG_TSY_TRANSPORT ?? '').trim().toLowerCase()
+  const transport = explicitTransport || (runtimeUrl ? 'http' : 'mock')
+  if (!['mock', 'http'].includes(transport)) {
+    throw new Error(`PG_TSY_TRANSPORT must be mock or http, got: ${transport}`)
+  }
+  const token = source.PG_TSY_RUNTIME_TOKEN
+  const scenario = String(source.PG_TSY_MOCK_SCENARIO ?? 'normal').toLowerCase()
+  const timeoutMs = Math.max(250, Math.min(30_000, Number(source.PG_TSY_HTTP_TIMEOUT_MS ?? 3000)))
+  if (transport === 'http' && !runtimeUrl) {
+    throw new Error('PG_TSY_RUNTIME_URL is required when PG_TSY_TRANSPORT=http')
+  }
   return { transport, runtimeUrl, token, scenario, timeoutMs }
 }
 
@@ -41,7 +53,6 @@ function rejected(ctx, req, res) {
 }
 
 async function upstreamJson(config, path, search = '') {
-  if (!config.runtimeUrl) throw new Error('PG_TSY_RUNTIME_URL is required when PG_TSY_TRANSPORT=http')
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), config.timeoutMs)
   try {
@@ -52,7 +63,11 @@ async function upstreamJson(config, path, search = '') {
     })
     const text = await response.text()
     if (!response.ok) throw new Error(`runtime upstream ${response.status}: ${text.slice(0, 240)}`)
-    return JSON.parse(text)
+    try {
+      return JSON.parse(text)
+    } catch {
+      throw new Error(`runtime upstream returned invalid JSON for ${path}`)
+    }
   } finally {
     clearTimeout(timer)
   }
@@ -79,7 +94,7 @@ export function apply(ctx) {
         const snapshot = config.transport === 'http'
           ? await upstreamJson(config, '/v1/snapshot')
           : mockSnapshot(config.scenario)
-        sendJson(res, 200, snapshot)
+        sendJson(res, 200, assertRuntimeSnapshot(snapshot))
       } catch (error) {
         unavailable(res, error)
       }
@@ -98,7 +113,7 @@ export function apply(ctx) {
         const payload = config.transport === 'http'
           ? await upstreamJson(config, '/v1/events', `?after=${after}&limit=${limit}`)
           : { events: mockEvents(config.scenario).filter(event => event.seq > after).slice(-limit) }
-        sendJson(res, 200, payload)
+        sendJson(res, 200, assertRuntimeEvents(payload))
       } catch (error) {
         unavailable(res, error)
       }
