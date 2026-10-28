@@ -195,7 +195,7 @@ The repository ships self-contained ESM source as the plugin entrypoints.
 npm run verify
 ```
 
-Tests cover safety-state derivation, stale/offline semantics, lost lease, unknown-order fail-closed behavior, Rust startup-gate decoding, strict runtime schema validation, real HTTP transport selection, mock recovery evidence, and the read-only diagnosis prompt.
+Tests cover safety-state derivation, stale/offline semantics, lost lease, unknown-order and missing-count fail-closed behavior, Rust startup-gate decoding, strict runtime schema validation, real HTTP transport selection, Host route fencing (fail-closed without the connection fence, 405, upstream bearer, cursor sanitizing, schema-mismatch 502), mock recovery evidence, and the read-only diagnosis prompt.
 
 ## Roadmap
 
