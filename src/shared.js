@@ -18,6 +18,13 @@ export function integer(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.trunc(Number(value))) : fallback
 }
 
+/** A reported non-negative integer count, or null when the evidence is missing or malformed. */
+export function reportedCount(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return null
+  const n = Number(value)
+  return Number.isSafeInteger(n) && n >= 0 ? n : null
+}
+
 export function isHealthy(value) {
   return String(value ?? '').toUpperCase() === 'HEALTHY'
 }
@@ -73,14 +80,17 @@ export function effectiveRuntimeState(snapshot, now = Date.now()) {
   const declared = String(snapshot?.safety?.state ?? '').toUpperCase()
   if (snapshot?.runtime?.halted === true || declared === 'HALTED') return 'HALTED'
 
-  const unknownOrders = integer(snapshot?.orders?.unknown)
-  const mismatchCount = integer(snapshot?.reconcile?.mismatch_count)
+  // A missing count is missing evidence, not zero.
+  const unknownOrders = reportedCount(snapshot?.orders?.unknown)
+  const mismatchCount = reportedCount(snapshot?.reconcile?.mismatch_count)
   const leaseOwned = snapshot?.lease?.required === false || snapshot?.lease?.owned === true
   const allowNewExposure = snapshot?.safety?.allow_new_exposure === true
   const startupReady = snapshot?.startup === undefined || snapshot.startup?.ready === true
   if (
     declared === 'SAFE_HOLD'
+    || unknownOrders === null
     || unknownOrders > 0
+    || mismatchCount === null
     || mismatchCount > 0
     || !leaseOwned
     || !allowNewExposure
@@ -120,8 +130,8 @@ export function makeDiagnosisPrompt(snapshot) {
     `Startup blockers: ${blockers.length ? blockers.join(', ') : 'none reported'}.`,
     `Journal: ${snapshot?.storage?.journal ?? 'UNKNOWN'}.`,
     `Reconcile: ${snapshot?.reconcile?.status ?? 'UNKNOWN'}.`,
-    `Unknown orders: ${integer(snapshot?.orders?.unknown)}.`,
-    `Reconcile mismatches: ${integer(snapshot?.reconcile?.mismatch_count)}.`,
+    `Unknown orders: ${reportedCount(snapshot?.orders?.unknown) ?? 'not reported'}.`,
+    `Reconcile mismatches: ${reportedCount(snapshot?.reconcile?.mismatch_count) ?? 'not reported'}.`,
     `Lease owned: ${snapshot?.lease?.owned === true ? 'yes' : 'no/unknown'}.`,
     'Trace market-data freshness -> signal -> strategy -> risk -> OMS -> execution -> journal -> reconcile.',
     'Treat PENDING/UNKNOWN as missing evidence, not as proof of failure or success.',

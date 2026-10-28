@@ -5,6 +5,7 @@ import {
   effectiveRuntimeState,
   gateStatusLabel,
   makeDiagnosisPrompt,
+  reportedCount,
   snapshotAgeMs,
 } from '../shared.js'
 
@@ -30,6 +31,13 @@ function tone(value) {
   if (['UNKNOWN', 'FAILED', 'HALTED', 'SAFE_HOLD', 'BLOCKED', 'STALE', 'NOT OWNED'].includes(v)) return 'pgtsy-bad'
   if (['DEGRADED', 'PARTIAL', 'WARNING', 'PENDING', 'CONFIGURED'].includes(v)) return 'pgtsy-warn'
   return ''
+}
+
+// Counts where a positive value is bad; a missing count is shown as UNKNOWN, never as a green 0.
+function riskCount(value, positiveClass = 'pgtsy-bad') {
+  const n = reportedCount(value)
+  if (n === null) return { value: 'UNKNOWN', className: 'pgtsy-bad' }
+  return { value: String(n), className: n > 0 ? positiveClass : 'pgtsy-good' }
 }
 
 function Row({ label, value, className = '' }) {
@@ -63,8 +71,8 @@ function Overview({ snapshot, state }) {
       h(Row, { label: 'Startup', value: snapshot?.startup?.ready === true ? 'READY' : 'NOT READY', className: snapshot?.startup?.ready === true ? 'pgtsy-good' : 'pgtsy-bad' }),
       h(Row, { label: 'Lease', value: snapshot?.lease?.owned ? `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}` : 'NOT OWNED', className: snapshot?.lease?.owned ? 'pgtsy-good' : 'pgtsy-bad' }),
       h(Row, { label: 'Lease heartbeat', value: fmtMs(snapshot?.lease?.heartbeat_age_ms) }),
-      h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${snapshot?.reconcile?.mismatch_count ?? 0} mismatch`, className: tone(snapshot?.reconcile?.status) }),
-      h(Row, { label: 'Unknown orders', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
+      h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${riskCount(snapshot?.reconcile?.mismatch_count).value} mismatch`, className: tone(snapshot?.reconcile?.status) }),
+      h(Row, { label: 'Unknown orders', ...riskCount(snapshot?.orders?.unknown) }),
       h(Row, { label: 'Journal', value: snapshot?.storage?.journal ?? 'UNKNOWN', className: tone(snapshot?.storage?.journal) })
     )),
     h(Section, { title: 'Startup gates' }, h(Card, null,
@@ -117,7 +125,7 @@ function Orders({ snapshot }) {
     h(Section, { title: 'OMS summary' }, h(Card, null,
       h(Row, { label: 'Open', value: String(snapshot?.orders?.open ?? 0) }),
       h(Row, { label: 'Partial', value: String(snapshot?.orders?.partial ?? 0), className: Number(snapshot?.orders?.partial) > 0 ? 'pgtsy-warn' : '' }),
-      h(Row, { label: 'Unknown', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
+      h(Row, { label: 'Unknown', ...riskCount(snapshot?.orders?.unknown) }),
       h(Row, { label: 'Filled recent', value: String(snapshot?.orders?.filled_recent ?? 0) })
     )),
     h(Section, { title: 'Recent orders' }, h(Card, null, recent.length ? h('ul', { className: 'pgtsy-list' }, recent.map(order => h('li', { key: order.id },
@@ -127,8 +135,8 @@ function Orders({ snapshot }) {
     h(Section, { title: 'Recovery' }, h(Card, null,
       h(Row, { label: 'Checkpoint seq', value: String(snapshot?.storage?.checkpoint_seq ?? '—') }),
       h(Row, { label: 'Journal tail', value: String(snapshot?.storage?.journal_tail_seq ?? '—') }),
-      h(Row, { label: 'Pending dispatch', value: String(snapshot?.storage?.pending_dispatch ?? '—'), className: Number(snapshot?.storage?.pending_dispatch) > 0 ? 'pgtsy-warn' : 'pgtsy-good' }),
-      h(Row, { label: 'Unknown ownership', value: String(snapshot?.reconcile?.ownership_unknown_count ?? 0), className: Number(snapshot?.reconcile?.ownership_unknown_count) > 0 ? 'pgtsy-bad' : 'pgtsy-good' })
+      h(Row, { label: 'Pending dispatch', ...riskCount(snapshot?.storage?.pending_dispatch, 'pgtsy-warn') }),
+      h(Row, { label: 'Unknown ownership', ...riskCount(snapshot?.reconcile?.ownership_unknown_count) })
     ))
   )
 }

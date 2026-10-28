@@ -6,6 +6,7 @@ import {
   effectiveRuntimeState,
   gateStatusLabel,
   makeDiagnosisPrompt,
+  reportedCount,
   startupBlockers,
 } from '../src/shared.js'
 import { mockSnapshot } from '../src/host/mock.js'
@@ -75,4 +76,34 @@ test('diagnosis prompt is explicitly read-only and reports evidence gaps', () =>
   assert.match(prompt, /Do not submit, cancel, flatten, restart, reload/i)
   assert.match(prompt, /Unknown orders: 1/)
   assert.match(prompt, /RuntimeLeaseAcquired=PENDING/)
+})
+
+test('missing or malformed unknown-order count is missing evidence, not zero', () => {
+  for (const value of [undefined, null, '', 'n/a', -1, 0.5, true]) {
+    const snapshot = mockSnapshot('normal')
+    snapshot.orders.unknown = value
+    assert.equal(effectiveRuntimeState(snapshot), 'SAFE_HOLD', `orders.unknown=${String(value)}`)
+  }
+})
+
+test('missing reconcile mismatch count forces SAFE_HOLD', () => {
+  const snapshot = mockSnapshot('normal')
+  delete snapshot.reconcile.mismatch_count
+  assert.equal(effectiveRuntimeState(snapshot), 'SAFE_HOLD')
+})
+
+test('reportedCount accepts only non-negative integer counts', () => {
+  assert.equal(reportedCount(0), 0)
+  assert.equal(reportedCount('3'), 3)
+  for (const value of [undefined, null, '', ' ', 'x', -1, 1.5, Infinity, false, {}]) {
+    assert.equal(reportedCount(value), null, String(value))
+  }
+})
+
+test('diagnosis prompt does not report a missing count as zero', () => {
+  const snapshot = mockSnapshot('normal')
+  snapshot.orders.unknown = null
+  const prompt = makeDiagnosisPrompt(snapshot)
+  assert.match(prompt, /Unknown orders: not reported\./)
+  assert.match(prompt, /Current console state: SAFE_HOLD\./)
 })
