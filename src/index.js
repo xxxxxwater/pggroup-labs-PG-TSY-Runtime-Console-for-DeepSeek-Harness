@@ -18,7 +18,13 @@ export function envConfig(source = process.env) {
   }
   const token = source.PG_TSY_RUNTIME_TOKEN
   const scenario = String(source.PG_TSY_MOCK_SCENARIO ?? 'normal').toLowerCase()
-  const timeoutMs = Math.max(250, Math.min(30_000, Number(source.PG_TSY_HTTP_TIMEOUT_MS ?? 3000)))
+  const rawTimeout = String(source.PG_TSY_HTTP_TIMEOUT_MS ?? '').trim()
+  const parsedTimeout = rawTimeout === '' ? 3000 : Number(rawTimeout)
+  // NaN would reach setTimeout as ~0 ms and abort every upstream request.
+  if (!Number.isFinite(parsedTimeout)) {
+    throw new Error(`PG_TSY_HTTP_TIMEOUT_MS must be a number of milliseconds, got: ${rawTimeout}`)
+  }
+  const timeoutMs = Math.max(250, Math.min(30_000, parsedTimeout))
   if (transport === 'http' && !runtimeUrl) {
     throw new Error('PG_TSY_RUNTIME_URL is required when PG_TSY_TRANSPORT=http')
   }
@@ -45,11 +51,26 @@ function method(req, res, expected) {
 }
 
 function rejected(ctx, req, res) {
-  const status = connectionOf(ctx)?.requestRejection?.(req)
+  const connection = connectionOf(ctx)
+  // Fail closed: without Harness' trust fence there is no Host/Origin/auth check.
+  if (typeof connection?.requestRejection !== 'function') {
+    res.statusCode = 503
+    res.end()
+    return true
+  }
+  const status = connection.requestRejection(req)
   if (status === undefined) return false
   res.statusCode = status
   res.end()
   return true
+}
+
+function queryInteger(params, key, fallback, min, max) {
+  const raw = params.get(key)
+  if (raw === null || raw.trim() === '') return fallback
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value)) return fallback
+  return Math.max(min, Math.min(max, value))
 }
 
 async function upstreamJson(config, path, search = '') {
@@ -108,8 +129,8 @@ export function apply(ctx) {
       if (rejected(ctx, req, res) || !method(req, res, 'GET')) return
       try {
         const url = new URL(String(req.url), 'http://localhost')
-        const after = Math.max(0, Number(url.searchParams.get('after') ?? 0))
-        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 80)))
+        const after = queryInteger(url.searchParams, 'after', 0, 0, Number.MAX_SAFE_INTEGER)
+        const limit = queryInteger(url.searchParams, 'limit', 80, 1, 200)
         const payload = config.transport === 'http'
           ? await upstreamJson(config, '/v1/events', `?after=${after}&limit=${limit}`)
           : { events: mockEvents(config.scenario).filter(event => event.seq > after).slice(-limit) }

@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   EVENTS_ROUTE,
   SNAPSHOT_ROUTE,
   effectiveRuntimeState,
   gateStatusLabel,
   makeDiagnosisPrompt,
+  reportedCount,
   snapshotAgeMs,
 } from '../shared.js'
 
@@ -30,6 +31,13 @@ function tone(value) {
   if (['UNKNOWN', 'FAILED', 'HALTED', 'SAFE_HOLD', 'BLOCKED', 'STALE', 'NOT OWNED'].includes(v)) return 'pgtsy-bad'
   if (['DEGRADED', 'PARTIAL', 'WARNING', 'PENDING', 'CONFIGURED'].includes(v)) return 'pgtsy-warn'
   return ''
+}
+
+// Counts where a positive value is bad; a missing count is shown as UNKNOWN, never as a green 0.
+function riskCount(value, positiveClass = 'pgtsy-bad') {
+  const n = reportedCount(value)
+  if (n === null) return { value: 'UNKNOWN', className: 'pgtsy-bad' }
+  return { value: String(n), className: n > 0 ? positiveClass : 'pgtsy-good' }
 }
 
 function Row({ label, value, className = '' }) {
@@ -63,8 +71,8 @@ function Overview({ snapshot, state }) {
       h(Row, { label: 'Startup', value: snapshot?.startup?.ready === true ? 'READY' : 'NOT READY', className: snapshot?.startup?.ready === true ? 'pgtsy-good' : 'pgtsy-bad' }),
       h(Row, { label: 'Lease', value: snapshot?.lease?.owned ? `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}` : 'NOT OWNED', className: snapshot?.lease?.owned ? 'pgtsy-good' : 'pgtsy-bad' }),
       h(Row, { label: 'Lease heartbeat', value: fmtMs(snapshot?.lease?.heartbeat_age_ms) }),
-      h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${snapshot?.reconcile?.mismatch_count ?? 0} mismatch`, className: tone(snapshot?.reconcile?.status) }),
-      h(Row, { label: 'Unknown orders', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
+      h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${riskCount(snapshot?.reconcile?.mismatch_count).value} mismatch`, className: tone(snapshot?.reconcile?.status) }),
+      h(Row, { label: 'Unknown orders', ...riskCount(snapshot?.orders?.unknown) }),
       h(Row, { label: 'Journal', value: snapshot?.storage?.journal ?? 'UNKNOWN', className: tone(snapshot?.storage?.journal) })
     )),
     h(Section, { title: 'Startup gates' }, h(Card, null,
@@ -117,7 +125,7 @@ function Orders({ snapshot }) {
     h(Section, { title: 'OMS summary' }, h(Card, null,
       h(Row, { label: 'Open', value: String(snapshot?.orders?.open ?? 0) }),
       h(Row, { label: 'Partial', value: String(snapshot?.orders?.partial ?? 0), className: Number(snapshot?.orders?.partial) > 0 ? 'pgtsy-warn' : '' }),
-      h(Row, { label: 'Unknown', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
+      h(Row, { label: 'Unknown', ...riskCount(snapshot?.orders?.unknown) }),
       h(Row, { label: 'Filled recent', value: String(snapshot?.orders?.filled_recent ?? 0) })
     )),
     h(Section, { title: 'Recent orders' }, h(Card, null, recent.length ? h('ul', { className: 'pgtsy-list' }, recent.map(order => h('li', { key: order.id },
@@ -127,14 +135,15 @@ function Orders({ snapshot }) {
     h(Section, { title: 'Recovery' }, h(Card, null,
       h(Row, { label: 'Checkpoint seq', value: String(snapshot?.storage?.checkpoint_seq ?? '—') }),
       h(Row, { label: 'Journal tail', value: String(snapshot?.storage?.journal_tail_seq ?? '—') }),
-      h(Row, { label: 'Pending dispatch', value: String(snapshot?.storage?.pending_dispatch ?? '—'), className: Number(snapshot?.storage?.pending_dispatch) > 0 ? 'pgtsy-warn' : 'pgtsy-good' }),
-      h(Row, { label: 'Unknown ownership', value: String(snapshot?.reconcile?.ownership_unknown_count ?? 0), className: Number(snapshot?.reconcile?.ownership_unknown_count) > 0 ? 'pgtsy-bad' : 'pgtsy-good' })
+      h(Row, { label: 'Pending dispatch', ...riskCount(snapshot?.storage?.pending_dispatch, 'pgtsy-warn') }),
+      h(Row, { label: 'Unknown ownership', ...riskCount(snapshot?.reconcile?.ownership_unknown_count) })
     ))
   )
 }
 
-function Events({ events }) {
+function Events({ events, error }) {
   return h(Section, { title: 'Structured runtime events' }, h(Card, null,
+    error && h('div', { className: 'pgtsy-error' }, `Event stream error: ${error.message}`),
     events.length ? h('div', { className: 'pgtsy-events' }, events.slice().reverse().map(event => h('div', { className: 'pgtsy-event', key: event.seq, 'data-severity': event.severity },
       h('span', { className: 'pgtsy-event-time' }, new Date(event.at).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })),
       h('div', null,
@@ -150,19 +159,40 @@ export function RuntimeConsole({ useTabInfo }) {
   const [snapshot, setSnapshot] = useState(null)
   const [events, setEvents] = useState([])
   const [error, setError] = useState(null)
+  const [eventsError, setEventsError] = useState(null)
   const [view, setView] = useState('overview')
   const [copied, setCopied] = useState(false)
 
-  const refresh = useCallback(async signal => {
+  // Signal of the mounted poll loop, and of the refresh currently in flight for it.
+  const lifecycle = useRef(null)
+  const inFlight = useRef(null)
+
+  const refresh = useCallback(async () => {
+    const signal = lifecycle.current
+    // One request at a time: a slow upstream (timeout up to 30 s) must not stack polls
+    // or let an older snapshot land after a newer one.
+    if (!signal || signal.aborted || inFlight.current === signal) return
+    inFlight.current = signal
     try {
-      const next = await getJson(SNAPSHOT_ROUTE, signal)
-      setSnapshot(next)
-      setError(null)
-      const eventPayload = await getJson(`${EVENTS_ROUTE}?after=0&limit=80`, signal)
-      const incoming = Array.isArray(eventPayload?.events) ? eventPayload.events : []
-      setEvents(incoming.slice(-200))
-    } catch (cause) {
-      if (cause?.name !== 'AbortError') setError(cause)
+      try {
+        const next = await getJson(SNAPSHOT_ROUTE, signal)
+        setSnapshot(next)
+        setError(null)
+      } catch (cause) {
+        if (cause?.name !== 'AbortError') setError(cause)
+        return
+      }
+      // The event ring is auxiliary: its failure must not turn the safety state OFFLINE.
+      try {
+        const eventPayload = await getJson(`${EVENTS_ROUTE}?after=0&limit=80`, signal)
+        const incoming = Array.isArray(eventPayload?.events) ? eventPayload.events : []
+        setEvents(incoming.slice(-200))
+        setEventsError(null)
+      } catch (cause) {
+        if (cause?.name !== 'AbortError') setEventsError(cause)
+      }
+    } finally {
+      if (inFlight.current === signal) inFlight.current = null
     }
   }, [])
 
@@ -171,11 +201,13 @@ export function RuntimeConsole({ useTabInfo }) {
     const controller = new AbortController()
     const abort = () => controller.abort()
     tab.signal.addEventListener('abort', abort, { once: true })
-    refresh(controller.signal)
-    const timer = setInterval(() => refresh(controller.signal), 2000)
+    lifecycle.current = controller.signal
+    refresh()
+    const timer = setInterval(refresh, 2000)
     return () => {
       clearInterval(timer)
       controller.abort()
+      if (lifecycle.current === controller.signal) lifecycle.current = null
       tab.signal.removeEventListener('abort', abort)
     }
   }, [tab.signal, refresh])
@@ -210,11 +242,11 @@ export function RuntimeConsole({ useTabInfo }) {
     }, id[0].toUpperCase() + id.slice(1)))),
     snapshot && view === 'overview' && h(Overview, { snapshot, state }),
     snapshot && view === 'orders' && h(Orders, { snapshot }),
-    view === 'events' && h(Events, { events }),
+    view === 'events' && h(Events, { events, error: eventsError }),
     !snapshot && !error && h('div', { className: 'pgtsy-empty' }, 'Loading runtime telemetry…'),
     error && h('div', { className: 'pgtsy-error' }, `Telemetry error: ${error.message}`),
     h('div', { className: 'pgtsy-actions' },
-      h('button', { type: 'button', className: 'pgtsy-btn', onClick: () => refresh(new AbortController().signal) }, 'Refresh'),
+      h('button', { type: 'button', className: 'pgtsy-btn', onClick: () => { refresh() } }, 'Refresh'),
       h('button', { type: 'button', className: 'pgtsy-btn', disabled: !snapshot, onClick: copyPrompt }, copied ? 'Copied' : 'Copy diagnosis prompt'),
       h('button', { type: 'button', className: 'pgtsy-btn', disabled: true, title: 'Control mutations are intentionally disabled until pg-core typed control API is production-complete.' }, 'Emergency Exit · not wired')
     ),
