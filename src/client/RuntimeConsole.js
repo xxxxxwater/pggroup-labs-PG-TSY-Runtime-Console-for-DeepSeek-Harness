@@ -7,6 +7,7 @@ import {
   makeDiagnosisPrompt,
   snapshotAgeMs,
 } from '../shared.js'
+import { getJson } from './http.js'
 
 const h = React.createElement
 
@@ -39,17 +40,6 @@ function Row({ label, value, className = '' }) {
 }
 function Section({ title, children }) { return h('section', { className: 'pgtsy-section' }, h('h3', null, title), children) }
 function Card({ children }) { return h('div', { className: 'pgtsy-card' }, children) }
-
-async function getJson(url, signal) {
-  const response = await fetch(url, { headers: { accept: 'application/json' }, signal })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const error = new Error(body.message || `HTTP ${response.status}`)
-    error.payload = body
-    throw error
-  }
-  return body
-}
 
 function Overview({ snapshot, state }) {
   const venues = Array.isArray(snapshot?.venues) ? snapshot.venues : []
@@ -145,6 +135,15 @@ function Events({ events }) {
   ))
 }
 
+function useNow(intervalMs) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs])
+  return now
+}
+
 export function RuntimeConsole({ useTabInfo }) {
   const { tab } = useTabInfo()
   const [snapshot, setSnapshot] = useState(null)
@@ -180,7 +179,10 @@ export function RuntimeConsole({ useTabInfo }) {
     }
   }, [tab.signal, refresh])
 
-  const state = useMemo(() => error ? 'OFFLINE' : effectiveRuntimeState(snapshot), [snapshot, error])
+  // Re-derive on a clock, not only when a response lands: a snapshot that stops being
+  // replaced must still age into OFFLINE.
+  const now = useNow(1000)
+  const state = useMemo(() => error ? 'OFFLINE' : effectiveRuntimeState(snapshot, now), [snapshot, error, now])
   const copyPrompt = async () => {
     try {
       await navigator.clipboard.writeText(makeDiagnosisPrompt(snapshot))
@@ -190,7 +192,7 @@ export function RuntimeConsole({ useTabInfo }) {
       setCopied(false)
     }
   }
-  const age = snapshot ? snapshotAgeMs(snapshot) : Infinity
+  const age = snapshot ? snapshotAgeMs(snapshot, now) : Infinity
   const reason = state === 'OFFLINE'
     ? (error?.payload?.safety_note ?? 'Telemetry unavailable. This does not prove trading is stopped; trading state is UNKNOWN.')
     : snapshot?.safety?.reason
