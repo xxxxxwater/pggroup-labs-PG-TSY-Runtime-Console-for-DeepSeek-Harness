@@ -14,6 +14,9 @@ export const RUNTIME_STATES = Object.freeze([
   'OFFLINE',
 ])
 
+// States pg-core may declare. OFFLINE is console-derived only (see docs/RUNTIME-CONTRACT.md).
+export const BACKEND_STATES = Object.freeze(['NORMAL', 'SHADOW', 'DEGRADED', 'SAFE_HOLD', 'HALTED'])
+
 export function integer(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.trunc(Number(value))) : fallback
 }
@@ -57,6 +60,12 @@ export function snapshotAgeMs(snapshot, now = Date.now()) {
   return Number.isFinite(parsed) ? Math.max(0, now - parsed) : Number.POSITIVE_INFINITY
 }
 
+/** Milliseconds `captured_at` lies in the future of `now` (0 when it does not). */
+export function snapshotClockLeadMs(snapshot, now = Date.now()) {
+  const parsed = Date.parse(snapshot?.telemetry?.captured_at ?? snapshot?.captured_at ?? '')
+  return Number.isFinite(parsed) ? Math.max(0, parsed - now) : 0
+}
+
 export function startupBlockers(snapshot) {
   if (snapshot?.startup?.ready === true) return []
   const gates = Array.isArray(snapshot?.startup?.gates) ? snapshot.startup.gates : []
@@ -69,9 +78,14 @@ export function effectiveRuntimeState(snapshot, now = Date.now()) {
   if (!snapshot) return 'OFFLINE'
   const staleAfter = integer(snapshot?.telemetry?.stale_after_ms, 10_000) || 10_000
   if (snapshotAgeMs(snapshot, now) > staleAfter) return 'OFFLINE'
+  // A capture time further in the future than the staleness window means the clocks
+  // disagree, so freshness cannot be proven; a frozen snapshot would otherwise stay "fresh".
+  if (snapshotClockLeadMs(snapshot, now) > staleAfter) return 'OFFLINE'
 
   const declared = String(snapshot?.safety?.state ?? '').toUpperCase()
   if (snapshot?.runtime?.halted === true || declared === 'HALTED') return 'HALTED'
+  // A missing or unrecognized backend state (e.g. OFFLINE, STOPPED) is missing evidence.
+  const declaredKnown = BACKEND_STATES.includes(declared)
 
   const unknownOrders = integer(snapshot?.orders?.unknown)
   const mismatchCount = integer(snapshot?.reconcile?.mismatch_count)
@@ -85,6 +99,7 @@ export function effectiveRuntimeState(snapshot, now = Date.now()) {
     || !leaseOwned
     || !allowNewExposure
     || !startupReady
+    || !declaredKnown
   ) return 'SAFE_HOLD'
 
   if (String(snapshot?.runtime?.mode ?? '').toLowerCase() === 'shadow' || declared === 'SHADOW') {
@@ -99,7 +114,10 @@ export function effectiveRuntimeState(snapshot, now = Date.now()) {
   const feedDegraded = Array.isArray(snapshot?.feeds)
     && snapshot.feeds.some(feed => feed?.required !== false && !isHealthy(feed?.status))
 
-  if (declared === 'DEGRADED' || venueDegraded || feedDegraded) return 'DEGRADED'
+  // Journal-before-dispatch and continuous reconcile underpin every other claim.
+  const recoveryDegraded = !isHealthy(snapshot?.storage?.journal) || !isHealthy(snapshot?.reconcile?.status)
+
+  if (declared === 'DEGRADED' || venueDegraded || feedDegraded || recoveryDegraded) return 'DEGRADED'
   return 'NORMAL'
 }
 
