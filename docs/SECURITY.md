@@ -58,3 +58,5 @@ Future mutations require all of:
 ## HTTP transport
 
 Prefer loopback, WireGuard, private VPC, mTLS proxy, or another authenticated private route between Harness Host and `pg-core`. If the runtime URL traverses an untrusted network, use TLS and rotate bearer credentials.
+
+`PG_TSY_RUNTIME_URL` must be an absolute `http(s)` base URL (an optional path prefix is allowed) without embedded `user:password@` credentials, query string or fragment; the Host refuses to start otherwise. Upstream credentials belong in `PG_TSY_RUNTIME_TOKEN`, which is redacted from any upstream error text relayed to the browser.

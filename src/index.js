@@ -9,8 +9,31 @@ import { mockEvents, mockSnapshot } from './host/mock.js'
 export const name = 'pg-tsy-runtime-console'
 export const inject = ['webServer', 'connection']
 
+function runtimeBaseUrl(raw) {
+  const value = String(raw ?? '').trim().replace(/\/+$/, '')
+  if (!value) return ''
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('PG_TSY_RUNTIME_URL must be an absolute http(s) URL')
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`PG_TSY_RUNTIME_URL must use http or https, got: ${url.protocol}`)
+  }
+  // fetch() rejects userinfo with an error message that echoes the full URL, which
+  // would reach the browser in the 502 body. Credentials belong in PG_TSY_RUNTIME_TOKEN.
+  if (url.username || url.password) {
+    throw new Error('PG_TSY_RUNTIME_URL must not embed credentials; use PG_TSY_RUNTIME_TOKEN')
+  }
+  if (url.search || url.hash) {
+    throw new Error('PG_TSY_RUNTIME_URL must not carry a query string or fragment')
+  }
+  return value
+}
+
 export function envConfig(source = process.env) {
-  const runtimeUrl = String(source.PG_TSY_RUNTIME_URL ?? '').replace(/\/+$/, '')
+  const runtimeUrl = runtimeBaseUrl(source.PG_TSY_RUNTIME_URL)
   const explicitTransport = String(source.PG_TSY_TRANSPORT ?? '').trim().toLowerCase()
   const transport = explicitTransport || (runtimeUrl ? 'http' : 'mock')
   if (!['mock', 'http'].includes(transport)) {
@@ -73,8 +96,10 @@ async function upstreamJson(config, path, search = '') {
   }
 }
 
-function unavailable(res, error) {
-  const message = error instanceof Error ? error.message : String(error)
+function unavailable(res, error, config) {
+  let message = error instanceof Error ? error.message : String(error)
+  // Upstream error bodies are relayed to the browser; never let them carry the Host-only token.
+  if (config.token) message = message.split(String(config.token)).join('[redacted]')
   sendJson(res, 502, {
     code: 'runtime-unavailable',
     message,
@@ -96,7 +121,7 @@ export function apply(ctx) {
           : mockSnapshot(config.scenario)
         sendJson(res, 200, assertRuntimeSnapshot(snapshot))
       } catch (error) {
-        unavailable(res, error)
+        unavailable(res, error, config)
       }
     }
   }), `pg-tsy-runtime: GET ${SNAPSHOT_ROUTE}`)
@@ -115,7 +140,7 @@ export function apply(ctx) {
           : { events: mockEvents(config.scenario).filter(event => event.seq > after).slice(-limit) }
         sendJson(res, 200, assertRuntimeEvents(payload))
       } catch (error) {
-        unavailable(res, error)
+        unavailable(res, error, config)
       }
     }
   }), `pg-tsy-runtime: GET ${EVENTS_ROUTE}`)
