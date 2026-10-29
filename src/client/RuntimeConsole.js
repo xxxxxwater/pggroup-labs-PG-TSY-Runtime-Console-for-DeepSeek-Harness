@@ -7,6 +7,7 @@ import {
   makeDiagnosisPrompt,
   snapshotAgeMs,
 } from '../shared.js'
+import { getJson } from './http.js'
 
 const h = React.createElement
 
@@ -40,15 +41,20 @@ function Row({ label, value, className = '' }) {
 function Section({ title, children }) { return h('section', { className: 'pgtsy-section' }, h('h3', null, title), children) }
 function Card({ children }) { return h('div', { className: 'pgtsy-card' }, children) }
 
-async function getJson(url, signal) {
-  const response = await fetch(url, { headers: { accept: 'application/json' }, signal })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const error = new Error(body.message || `HTTP ${response.status}`)
-    error.payload = body
-    throw error
+// Only a literal `true` counts, exactly as in effectiveRuntimeState: a truthy string such
+// as "false" must not render green while the badge says SAFE_HOLD.
+function exposureRow(snapshot) {
+  return snapshot?.safety?.allow_new_exposure === true
+    ? { value: 'ALLOWED', className: 'pgtsy-good' }
+    : { value: 'BLOCKED', className: 'pgtsy-bad' }
+}
+
+function leaseRow(snapshot) {
+  if (snapshot?.lease?.owned === true) {
+    return { value: `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}`, className: 'pgtsy-good' }
   }
-  return body
+  if (snapshot?.lease?.required === false) return { value: 'NOT REQUIRED', className: 'pgtsy-muted' }
+  return { value: 'NOT OWNED', className: 'pgtsy-bad' }
 }
 
 function Overview({ snapshot, state }) {
@@ -59,9 +65,9 @@ function Overview({ snapshot, state }) {
   const gates = Array.isArray(snapshot?.startup?.gates) ? snapshot.startup.gates : []
   return h(React.Fragment, null,
     h(Section, { title: 'Safety' }, h(Card, null,
-      h(Row, { label: 'New exposure', value: snapshot?.safety?.allow_new_exposure ? 'ALLOWED' : 'BLOCKED', className: snapshot?.safety?.allow_new_exposure ? 'pgtsy-good' : 'pgtsy-bad' }),
+      h(Row, { label: 'New exposure', ...exposureRow(snapshot) }),
       h(Row, { label: 'Startup', value: snapshot?.startup?.ready === true ? 'READY' : 'NOT READY', className: snapshot?.startup?.ready === true ? 'pgtsy-good' : 'pgtsy-bad' }),
-      h(Row, { label: 'Lease', value: snapshot?.lease?.owned ? `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}` : 'NOT OWNED', className: snapshot?.lease?.owned ? 'pgtsy-good' : 'pgtsy-bad' }),
+      h(Row, { label: 'Lease', ...leaseRow(snapshot) }),
       h(Row, { label: 'Lease heartbeat', value: fmtMs(snapshot?.lease?.heartbeat_age_ms) }),
       h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${snapshot?.reconcile?.mismatch_count ?? 0} mismatch`, className: tone(snapshot?.reconcile?.status) }),
       h(Row, { label: 'Unknown orders', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
@@ -145,6 +151,15 @@ function Events({ events }) {
   ))
 }
 
+function useNow(intervalMs) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs])
+  return now
+}
+
 export function RuntimeConsole({ useTabInfo }) {
   const { tab } = useTabInfo()
   const [snapshot, setSnapshot] = useState(null)
@@ -180,7 +195,10 @@ export function RuntimeConsole({ useTabInfo }) {
     }
   }, [tab.signal, refresh])
 
-  const state = useMemo(() => error ? 'OFFLINE' : effectiveRuntimeState(snapshot), [snapshot, error])
+  // Re-derive on a clock, not only when a response lands: a snapshot that stops being
+  // replaced must still age into OFFLINE.
+  const now = useNow(1000)
+  const state = useMemo(() => error ? 'OFFLINE' : effectiveRuntimeState(snapshot, now), [snapshot, error, now])
   const copyPrompt = async () => {
     try {
       await navigator.clipboard.writeText(makeDiagnosisPrompt(snapshot))
@@ -190,12 +208,14 @@ export function RuntimeConsole({ useTabInfo }) {
       setCopied(false)
     }
   }
-  const age = snapshot ? snapshotAgeMs(snapshot) : Infinity
+  const age = snapshot ? snapshotAgeMs(snapshot, now) : Infinity
   const reason = state === 'OFFLINE'
     ? (error?.payload?.safety_note ?? 'Telemetry unavailable. This does not prove trading is stopped; trading state is UNKNOWN.')
     : snapshot?.safety?.reason
 
-  return h('div', { className: 'pgtsy-root' },
+  // While OFFLINE the last snapshot is history, not runtime truth: say so and mute its colours.
+  const stale = state === 'OFFLINE' && snapshot !== null
+  return h('div', { className: 'pgtsy-root', 'data-stale': stale ? 'true' : undefined },
     h('header', { className: 'pgtsy-head' },
       h('div', null,
         h('div', { className: 'pgtsy-title' }, 'PG TSY Runtime'),
@@ -205,6 +225,7 @@ export function RuntimeConsole({ useTabInfo }) {
     (reason || state !== 'NORMAL') && h('div', { className: 'pgtsy-banner', 'data-state': state },
       h('strong', null, state === 'OFFLINE' ? 'Trading state UNKNOWN' : state),
       h('div', null, reason || `Runtime is ${state}.`)),
+    stale && h('div', { className: 'pgtsy-stale' }, `Last known snapshot (captured ${Number.isFinite(age) ? `${fmtMs(age)} ago` : 'at an unknown time'}) — not current runtime truth.`),
     h('nav', { className: 'pgtsy-tabs', 'aria-label': 'PG TSY runtime views' }, ['overview', 'orders', 'events'].map(id => h('button', {
       type: 'button', className: 'pgtsy-tab', key: id, 'aria-selected': view === id, onClick: () => setView(id)
     }, id[0].toUpperCase() + id.slice(1)))),

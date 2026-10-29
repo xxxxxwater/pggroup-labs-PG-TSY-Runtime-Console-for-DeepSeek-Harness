@@ -72,13 +72,15 @@ The console derives a conservative display state from facts rather than trusting
 
 `SAFE_HOLD` wins when any of these are true:
 
-- backend explicitly reports `SAFE_HOLD`;
+- backend explicitly reports `SAFE_HOLD`, or reports no/an unrecognized safety state;
 - an order has unknown external outcome;
 - reconciliation has mismatches;
 - a required runtime lease is not owned;
 - new exposure is not allowed.
 
-`OFFLINE` is client-derived when telemetry is stale or unavailable. It means **runtime truth cannot be observed**, not `STOPPED`.
+`DEGRADED` also applies when the journal or reconcile status is not `HEALTHY`.
+
+`OFFLINE` is client-derived when telemetry is stale or unavailable, or when `captured_at` lies further in the future than the staleness window (freshness cannot be proven across disagreeing clocks). It means **runtime truth cannot be observed**, not `STOPPED`.
 
 ## Control boundary
 

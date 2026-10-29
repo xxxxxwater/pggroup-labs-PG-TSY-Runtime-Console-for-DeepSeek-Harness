@@ -29,6 +29,8 @@ Telemetry unavailable. This does not prove trading is stopped;
 trading state is UNKNOWN.
 ```
 
+While `OFFLINE`, the last received snapshot may stay visible only as history: it is labelled "Last known snapshot … not current runtime truth" and its good/warn/bad colours are muted.
+
 ## Views
 
 ### Overview
