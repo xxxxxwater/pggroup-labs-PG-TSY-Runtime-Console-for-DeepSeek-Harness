@@ -41,6 +41,22 @@ function Row({ label, value, className = '' }) {
 function Section({ title, children }) { return h('section', { className: 'pgtsy-section' }, h('h3', null, title), children) }
 function Card({ children }) { return h('div', { className: 'pgtsy-card' }, children) }
 
+// Only a literal `true` counts, exactly as in effectiveRuntimeState: a truthy string such
+// as "false" must not render green while the badge says SAFE_HOLD.
+function exposureRow(snapshot) {
+  return snapshot?.safety?.allow_new_exposure === true
+    ? { value: 'ALLOWED', className: 'pgtsy-good' }
+    : { value: 'BLOCKED', className: 'pgtsy-bad' }
+}
+
+function leaseRow(snapshot) {
+  if (snapshot?.lease?.owned === true) {
+    return { value: `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}`, className: 'pgtsy-good' }
+  }
+  if (snapshot?.lease?.required === false) return { value: 'NOT REQUIRED', className: 'pgtsy-muted' }
+  return { value: 'NOT OWNED', className: 'pgtsy-bad' }
+}
+
 function Overview({ snapshot, state }) {
   const venues = Array.isArray(snapshot?.venues) ? snapshot.venues : []
   const feeds = Array.isArray(snapshot?.feeds) ? snapshot.feeds : []
@@ -49,9 +65,9 @@ function Overview({ snapshot, state }) {
   const gates = Array.isArray(snapshot?.startup?.gates) ? snapshot.startup.gates : []
   return h(React.Fragment, null,
     h(Section, { title: 'Safety' }, h(Card, null,
-      h(Row, { label: 'New exposure', value: snapshot?.safety?.allow_new_exposure ? 'ALLOWED' : 'BLOCKED', className: snapshot?.safety?.allow_new_exposure ? 'pgtsy-good' : 'pgtsy-bad' }),
+      h(Row, { label: 'New exposure', ...exposureRow(snapshot) }),
       h(Row, { label: 'Startup', value: snapshot?.startup?.ready === true ? 'READY' : 'NOT READY', className: snapshot?.startup?.ready === true ? 'pgtsy-good' : 'pgtsy-bad' }),
-      h(Row, { label: 'Lease', value: snapshot?.lease?.owned ? `OWNED · #${snapshot?.lease?.fencing_token ?? '—'}` : 'NOT OWNED', className: snapshot?.lease?.owned ? 'pgtsy-good' : 'pgtsy-bad' }),
+      h(Row, { label: 'Lease', ...leaseRow(snapshot) }),
       h(Row, { label: 'Lease heartbeat', value: fmtMs(snapshot?.lease?.heartbeat_age_ms) }),
       h(Row, { label: 'Reconcile', value: `${snapshot?.reconcile?.status ?? 'UNKNOWN'} · ${snapshot?.reconcile?.mismatch_count ?? 0} mismatch`, className: tone(snapshot?.reconcile?.status) }),
       h(Row, { label: 'Unknown orders', value: String(snapshot?.orders?.unknown ?? 0), className: Number(snapshot?.orders?.unknown) > 0 ? 'pgtsy-bad' : 'pgtsy-good' }),
@@ -197,7 +213,9 @@ export function RuntimeConsole({ useTabInfo }) {
     ? (error?.payload?.safety_note ?? 'Telemetry unavailable. This does not prove trading is stopped; trading state is UNKNOWN.')
     : snapshot?.safety?.reason
 
-  return h('div', { className: 'pgtsy-root' },
+  // While OFFLINE the last snapshot is history, not runtime truth: say so and mute its colours.
+  const stale = state === 'OFFLINE' && snapshot !== null
+  return h('div', { className: 'pgtsy-root', 'data-stale': stale ? 'true' : undefined },
     h('header', { className: 'pgtsy-head' },
       h('div', null,
         h('div', { className: 'pgtsy-title' }, 'PG TSY Runtime'),
@@ -207,6 +225,7 @@ export function RuntimeConsole({ useTabInfo }) {
     (reason || state !== 'NORMAL') && h('div', { className: 'pgtsy-banner', 'data-state': state },
       h('strong', null, state === 'OFFLINE' ? 'Trading state UNKNOWN' : state),
       h('div', null, reason || `Runtime is ${state}.`)),
+    stale && h('div', { className: 'pgtsy-stale' }, `Last known snapshot (captured ${Number.isFinite(age) ? `${fmtMs(age)} ago` : 'at an unknown time'}) — not current runtime truth.`),
     h('nav', { className: 'pgtsy-tabs', 'aria-label': 'PG TSY runtime views' }, ['overview', 'orders', 'events'].map(id => h('button', {
       type: 'button', className: 'pgtsy-tab', key: id, 'aria-selected': view === id, onClick: () => setView(id)
     }, id[0].toUpperCase() + id.slice(1)))),
